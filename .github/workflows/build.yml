@@ -32,24 +32,60 @@ on:
       DSM_VERSION:
         description: 'DSM Version'
         required: true
-        default: '7.1'
+        default: '7.2'
 
 defaults:
   run:
     shell: bash
 
 env:
-  DSM_VERSION: '7.1'
+  SYNO_TOOLKIT_BASE_URL: https://global.download.synology.com/download/ToolChain/toolkit
+  DSM_VERSION: '7.2'
 
 jobs:
+  ###########################################################
+  preparation:
+  ###########################################################
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Git checkout
+      uses: actions/checkout@v4  # https://github.com/actions/checkout
+
+    - name: Determine effective DSM version
+      run: |
+        set -eux
+        if [[ -n "${{ github.event.inputs.DSM_VERSION }}" ]]; then
+          echo "DSM_VERSION=${{ github.event.inputs.DSM_VERSION }}" >> $GITHUB_ENV
+        fi
+
+    - uses: actions/cache@v4  # https://github.com/actions/cache
+      id: cache_synology_toolkit_base_env
+      with:
+        path: toolkit_tarballs/base_env-*
+        key: synology_toolkit_tarballs_DSM${{ env.DSM_VERSION }}_base_env
+        lookup-only: true
+
+    - name: Download Synology Base Toolkit tarball
+      if: steps.cache_synology_toolkit_base_env.outputs.cache-hit != 'true'
+      run: |
+        set -eux
+
+        mkdir -p toolkit_tarballs
+        pushd toolkit_tarballs/
+          archive=base_env-${DSM_VERSION}.txz
+          curl -sSf "$SYNO_TOOLKIT_BASE_URL/$DSM_VERSION/base/$archive" -o $archive
+        popd
+
 
   ###########################################################
   build-spks:
   ###########################################################
     runs-on: ubuntu-latest
+    needs: 
+      - preparation
 
     strategy:
-      max-parallel: 4
       fail-fast: false
       matrix:
         # see https://kb.synology.com/en-uk/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have
@@ -62,7 +98,7 @@ jobs:
         - broadwell
         - broadwellnk
         - bromolow
-        - cedarview
+        #- cedarview  # no DSM 7.2 support
         - denverton  # e.g. RS2418+
         - geminilake
         - grantley
@@ -71,37 +107,44 @@ jobs:
         - purley
         - r1000
         - rtd1296
-        - rtd1619b
+        #- rtd1619b  # compat.h:41:2: error: #error "WireGuard has been merged into Linux >= 5.6 and therefore this compatibility module is no longer required."
         - v1000
 
     steps:
-    - name: Git checkout
-      uses: actions/checkout@v4  # https://github.com/actions/checkout
-
-    - name: Set effective DSM version
+    - name: Determine effective DSM version
       run: |
         set -eux
-
         if [[ -n "${{ github.event.inputs.DSM_VERSION }}" ]]; then
           echo "DSM_VERSION=${{ github.event.inputs.DSM_VERSION }}" >> $GITHUB_ENV
         fi
 
-    - name: Build synobuild Docker image
+
+    - name: "Show: environment variables"
+      run: env | sort
+
+
+    - name: Git checkout
+      uses: actions/checkout@v4  # https://github.com/actions/checkout
+
+
+    - name: Build [synobuild] Docker image
       run: |
         set -eux
 
         docker build -t synobuild .
 
-    - uses: actions/cache@v4  # https://github.com/actions/cache
+
+    - uses: actions/cache/restore@v4  # https://github.com/actions/cache
       with:
         path: toolkit_tarballs/base_env-*
         key: synology_toolkit_tarballs_DSM${{ env.DSM_VERSION }}_base_env
 
-    - uses: actions/cache@v4  # https://github.com/actions/cache
-      if: github.ref_name == 'master'
+
+    - uses: actions/cache/restore@v4  # https://github.com/actions/cache
       with:
         path: toolkit_tarballs/ds.*
         key: synology_toolkit_tarballs_DSM${{ env.DSM_VERSION }}_${{ matrix.PACKAGE_ARCH }}
+
 
     - name: Download Synology Toolkit tarballs
       run: |
@@ -109,21 +152,15 @@ jobs:
 
         mkdir -p toolkit_tarballs
         pushd toolkit_tarballs/
-
-        archive_base_url="https://global.download.synology.com/download/ToolChain/toolkit/$DSM_VERSION"
-
-        archive=base_env-${DSM_VERSION}.txz
-        [[ -f $archive ]] || curl -sSf "$archive_base_url/base/$archive" -o $archive
-
-        archive=ds.${{ matrix.PACKAGE_ARCH }}-$DSM_VERSION.dev.txz
-        [[ -f $archive ]] || curl -sSf "$archive_base_url/${{ matrix.PACKAGE_ARCH }}/$archive" -o $archive
-
-        archive=ds.${{ matrix.PACKAGE_ARCH }}-$DSM_VERSION.env.txz
-        [[ -f $archive ]] || curl -sSf "$archive_base_url/${{ matrix.PACKAGE_ARCH }}/$archive" -o $archive
+          archive_base_url="https://global.download.synology.com/download/ToolChain/toolkit/$DSM_VERSION"
+          archive=ds.${{ matrix.PACKAGE_ARCH }}-$DSM_VERSION.dev.txz
+          [[ -f $archive ]] || curl -sSf "$SYNO_TOOLKIT_BASE_URL/$DSM_VERSION/${{ matrix.PACKAGE_ARCH }}/$archive" -o $archive
+          archive=ds.${{ matrix.PACKAGE_ARCH }}-$DSM_VERSION.env.txz
+          [[ -f $archive ]] || curl -sSf "$SYNO_TOOLKIT_BASE_URL/$DSM_VERSION/${{ matrix.PACKAGE_ARCH }}/$archive" -o $archive
         popd
 
+
     - name: Build SPK files
-      continue-on-error: true
       run: |
         set -eux
 
@@ -141,9 +178,10 @@ jobs:
           sudo mv "$spk" "${spk%.spk}_DSM${DSM_VERSION}.spk"
         done
 
+
     - name: Upload SPKs
-      if: github.ref == 'refs/heads/master'
-      uses: actions/upload-artifact@v4
+      if: github.ref_name == 'main'
+      uses: actions/upload-artifact@v4  # https://github.com/actions/upload-artifact
       with:
         name: artifacts-${{ matrix.PACKAGE_ARCH }}
         path: artifacts/**
@@ -155,7 +193,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: 
       - build-spks
-    if: github.ref == 'refs/heads/master'
+    if: github.ref_name == 'main'
     concurrency: publish-latest-release # https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idconcurrency
 
     steps:
@@ -163,8 +201,10 @@ jobs:
       # only required by "hub release create" to prevent "fatal: Not a git repository"
       uses: actions/checkout@v4  # https://github.com/actions/checkout
 
+
     - name: Download build artifacts
       uses: actions/download-artifact@v4
+
 
     - name: Set effective DSM version
       run: |
@@ -174,6 +214,7 @@ jobs:
           echo "DSM_VERSION=${{ github.event.inputs.DSM_VERSION }}" >> $GITHUB_ENV
         fi
 
+
     - name: Set effective WireGuard version
       run: |
         set -eux
@@ -181,6 +222,7 @@ jobs:
         spks=($(ls artifacts-*/WireGuard-*/*.spk))
         [[ ${spks[0]} =~ ([0-9.]+) ]] && echo "${BASH_REMATCH[1]}"
         echo "WG_VERSION=${BASH_REMATCH[1]}" >> $GITHUB_ENV
+
 
     - name: "Delete previous release"
       env:
@@ -198,9 +240,10 @@ jobs:
         # delete git tag
         tag_url="$api_base_url/git/refs/tags/${release_name}"
         if curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -fsLo /dev/null --head "$tag_url"; then
-           echo "Deleting tag [$tag_url]..."
-           curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -fsSL -X DELETE "$tag_url"
+          echo "Deleting tag [$tag_url]..."
+          curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -fsSL -X DELETE "$tag_url"
         fi
+
 
     - name: "Create release"
       env:
@@ -217,13 +260,14 @@ jobs:
         **Use at your own risk. We are not responsible if this breaks your NAS. Realistically it should not result in data loss, but it could render your NAS inaccessible if something goes wrong.**
 
         **Especially if you are not comfortable with removing the hard drives from your NAS and manually recovering the data, this is not for you.**
-        
+
         See https://kb.synology.com/en-uk/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have to find the right architecture of your NAS
         " | GH_DEBUG=1 gh release create "$release_name" \
           --latest \
           --notes-file - \
           --target "${{ github.sha }}" \
           $(ls artifacts-*/WireGuard-*/*.spk)
+
 
     - name: "Delete intermediate build artifacts"
       uses: geekyeggo/delete-artifact@v5 # https://github.com/GeekyEggo/delete-artifact/

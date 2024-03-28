@@ -84,6 +84,14 @@ if [ ! -d "$build_env" ]; then
         pkgscripts-ng/EnvDeploy -p $PACKAGE_ARCH -v $DSM_VER
     fi
 
+    # workaround for "error: unknown type name 'hsiphash_key_t'" on DSM 7.2, see also https://github.com/runfalk/synology-wireguard/issues/179
+    case $PACKAGE_ARCH in
+        avoton|armada38x|braswell|bromolow|grantley|monaco)
+            # remove the Synology siphash.h header file so WireGuard will be built using the 'built-in' compat siphash version wireguard compat sources
+            find "$build_env/usr/local" -type f -iwholename "**/DSM-$DSM_VER/build/include/linux/siphash.h" -exec rm -v {} \;
+        ;;
+    esac
+
     # Ensure the installed toolchain has support for CA signed certificates.
     # Without this wget on https:// will fail
     cp /etc/ssl/certs/ca-certificates.crt "$build_env/etc/ssl/certs/"
